@@ -1,0 +1,112 @@
+name: build-haydn-sukisu
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: "AGNi 内核分支"
+        required: false
+        default: "AGNi_haydn_MIUI_ST"
+      sukisu_mode:
+        description: "SukiSU 驱动模式（main=kprobe 免改源码；builtin=手动hook+SUSFS）"
+        required: true
+        default: "main"
+        type: choice
+        options:
+          - main
+          - builtin
+      sukisu_ref:
+        description: "SukiSU 版本（留空=最新 tag；也可填 v4.2.1-r2 / commit）"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: 检出构建脚本
+        uses: actions/checkout@v4
+
+      - name: 安装编译依赖
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            bc bison build-essential flex libssl-dev libelf-dev \
+            python3 git zip unzip curl ca-certificates \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            clang-14 lld-14 llvm-14
+
+      - name: 拉取内核源码
+        run: |
+          set -e
+          git clone --depth=1 --single-branch \
+            --branch "${{ inputs.kernel_branch }}" \
+            https://github.com/psndna88/AGNi_pureMIUI.git kernel
+          cd kernel
+          echo "内核源码版本："
+          head -5 Makefile
+
+      - name: 集成 SukiSU 驱动
+        run: |
+          set -e
+          cd kernel
+          # AGNi 树自带 KernelSU-Next 驱动目录，先摘掉避免符号链接冲突
+          rm -rf drivers/kernelsu KernelSU
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
+            | bash -s "${{ inputs.sukisu_mode }}"
+          if [ -n "${{ inputs.sukisu_ref }}" ]; then
+            cd KernelSU
+            git fetch --tags --depth=1 origin "${{ inputs.sukisu_ref }}" || true
+            git checkout "${{ inputs.sukisu_ref }}"
+            cd ..
+          fi
+          echo "SukiSU 提交：$(cd KernelSU && git rev-parse --short HEAD)"
+          ls -l drivers/kernelsu
+
+      - name: 调整 defconfig
+        run: |
+          set -e
+          cd kernel
+          DEF=arch/arm64/configs/agni_haydn_defconfig
+          # 打开 KSU 驱动
+          sed -i '/^#\? *CONFIG_KSU=/d; /^#\? *CONFIG_KSU_DEBUG=/d' "$DEF"
+          printf '\nCONFIG_KSU=y\n# CONFIG_KSU_DEBUG is not set\n# CONFIG_WERROR is not set\n' >> "$DEF"
+          # builtin 模式才需要 SUSFS；main 模式不认这些符号，kconfig 会自动忽略
+          if [ "${{ inputs.sukisu_mode }}" = "builtin" ]; then
+            printf 'CONFIG_KSU_SUSFS=y\n' >> "$DEF"
+          fi
+          tail -8 "$DEF"
+
+      - name: 编译内核
+        run: |
+          set -e
+          cd kernel
+          MAKE_ARGS="ARCH=arm64 O=out \
+            CC=clang-14 LD=ld.lld-14 AR=llvm-ar-14 NM=llvm-nm-14 \
+            OBJCOPY=llvm-objcopy-14 OBJDUMP=llvm-objdump-14 STRIP=llvm-strip-14 \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
+            LLVM_IAS=0"
+          make $MAKE_ARGS agni_haydn_defconfig
+          make $MAKE_ARGS -j"$(nproc --all)"
+          ls -lh out/arch/arm64/boot/Image
+
+      - name: 校验产物
+        run: |
+          set -e
+          cd kernel
+          file out/arch/arm64/boot/Image
+          strings out/arch/arm64/boot/Image | grep -m1 "Linux version" || true
+          strings out/arch/arm64/boot/Image | grep -m1 -i "kernelsu" || true
+          cp out/arch/arm64/boot/Image ../Image
+          cp out/.config ../kernel.config
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image-${{ inputs.sukisu_mode }}
+          path: |
+            Image
+            kernel.config
+          if-no-files-found: error

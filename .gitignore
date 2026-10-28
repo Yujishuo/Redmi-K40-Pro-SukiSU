@@ -1,0 +1,36 @@
+# ---- 内核 / boot 镜像（单个 56~192MB，远超 GitHub 单文件 100MB 上限）----
+*.img
+*.bin
+new-boot.img
+
+# ---- APK / 二进制产物 ----
+*.apk
+probe_ksu
+ksud_arm64_new
+_apk/
+
+# ---- 下载缓存 ----
+downloads/
+
+# ---- 工作目录（SukiSU 源码快照、打包中间产物）----
+.work/
+out/
+
+# ---- 本地会话数据 ----
+.workbuddy/
+
+# ---- 调试截图（保留 docs/ 下的正式配图）----
+/s1.png
+/s2.png
+/s3.png
+/s4.png
+/s5.png
+/s6.png
+/s7.png
+/shot*.png
+
+# ---- 日志与临时输出 ----
+*.log
+_build*.log
+pkg.txt
+*.tmp
