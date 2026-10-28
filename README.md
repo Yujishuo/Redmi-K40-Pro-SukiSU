@@ -386,3 +386,47 @@ SukiSU 4.x 把模块 overlay 挂载交给 **metamodule**（`/data/adb/metamodule
 
 `meta-overlayfs` 的双目录约定：元数据在 `/data/adb/modules/<id>/`，
 overlay 内容在 `/data/adb/metamodule/mnt/<id>/`。本机模块都不涉及，故无影响。
+
+---
+
+## 十二、开启 KPM 的尝试（结果：无法开机，已回退）
+
+`CONFIG_KPM` 是 SukiSU 的内核补丁模块加载器（运行时加载 `.kpm`）。开启方式很简单：
+
+```bash
+# scripts/patch-all-5.4.sh 的 defconfig 段已含 CONFIG_KPM=y（可用 KSU_KPM=0 关掉）
+bash scripts/patch-all-5.4.sh ./kernel
+```
+
+`config` 核对（确实生效了）：
+
+```
+CONFIG_KALLSYMS=y          # Kconfig 会 select
+CONFIG_KALLSYMS_ALL=y
+CONFIG_KSU=y
+CONFIG_KPM=y
+```
+
+编译 0 error，产物 56 MB，`repack-boot-local.py` 重打包正常，`flash-boot-safe.sh` 刷入 slot a。
+
+**结果：无法开机。** 卡住后 `current-slot` 仍是 a —— 说明不是 panic 触发 bootloader 切槽，
+而是在启动早期就卡死了。已刷回 `boot_fresh.img` 恢复。
+
+### 没能定位的原因
+
+1. **拿不到崩溃日志**：`/sys/fs/pstore/console-ramoops-0` 保留的是**上一次正常开机**的
+   日志（因为我们刷机前执行过 `adb reboot bootloader`，它覆盖了 ramoops）。
+   设备卡死时又无法通过 adb 读取，所以那次的 dmesg 永久丢失。
+2. **`/proc/config.gz` 是假的**：本机 `zcat /proc/config.gz` 显示
+   `# Linux/arm64 5.4.259 Kernel Configuration` + `Android clang 11.0.2`，
+   而 `uname -r` 是 `5.4.302-AGNi_haydn_HyperOS_v7.16.2-qgki` + Ubuntu clang 18.1.3。
+   这个 blob 是原厂残留，**不能用它做配置对比**（拿它 diff 会得到 1400+ 行噪声）。
+
+### 排查方向（下次要试的话）
+
+- KPM 本身**没有 initcall**（`grep kpm_init` 无结果），是懒加载：只有 `ksud kpm load`
+  才激活。所以「多出来的代码导致开机卡死」这个解释站不住，更像扩展注册阶段出的问题
+  （`extension/kpm.c` 的 `.get` 会调 `sukisu_kpm_bridge(SUKISU_KPM_PROBE)`，
+  由 `extension.c` 在初始化时注册）。
+- 复现时应该：清空 `out/` 全新编译（避免 ccache/增量干扰），一次只改 KPM 一个变量，
+  并且**刷机前不要 reboot bootloader**，让失败那次的 ramoops 能留下来。

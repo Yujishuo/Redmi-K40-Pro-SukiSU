@@ -151,12 +151,28 @@ KSU_SRC="$KS/kernel" KSU_PATCH_BOOT_EVENT="${KSU_PATCH_BOOT_EVENT:-0}" \
 
 # ---------------------------------------------------------------------------
 # 10. defconfig
+#     这一段必须完全幂等：先把本脚本管理过的行全部删掉，再统一追加一次。
+#     （早期版本只删 CONFIG_KSU 几行，重复执行会把整块配置叠加成两份）
 # ---------------------------------------------------------------------------
 DEF=arch/arm64/configs/agni_haydn_defconfig
 if [ -f "$DEF" ]; then
-  sed -i '/^#\? *CONFIG_KSU=/d; /^#\? *CONFIG_KSU_DEBUG=/d; /^#\? *CONFIG_WERROR=/d' "$DEF"
+  sed -i -E \
+    -e '/^CONFIG_KSU=/d' \
+    -e '/^# CONFIG_KSU_DEBUG is not set$/d' \
+    -e '/^# CONFIG_WERROR is not set$/d' \
+    -e '/^# CONFIG_BPF_PRELOAD is not set$/d' \
+    -e '/^CONFIG_MODVERSIONS=/d' \
+    -e '/^CONFIG_ASM_MODVERSIONS=/d' \
+    -e '/^# CONFIG_MODVERSIONS is not set$/d' \
+    -e '/^CONFIG_KPM=/d' \
+    -e '/^# CONFIG_KPM is not set$/d' \
+    -e '/^# ---- KernelSU build options/d' \
+    -e '/^# ---- end ----$/d' \
+    "$DEF"
+
   {
     echo
+    echo "# ---- KernelSU build options (managed by patch-all-5.4.sh) ----"
     echo "CONFIG_KSU=y"
     echo "# CONFIG_KSU_DEBUG is not set"
     echo "# CONFIG_WERROR is not set"
@@ -165,9 +181,16 @@ if [ -f "$DEF" ]; then
     # "relocation R_AARCH64_ABS32 cannot be used against symbol '__crc_...'"。
     # 本机型所有驱动都编进内核、不加载外部模块，关掉 MODVERSIONS 无副作用。
     echo "# CONFIG_MODVERSIONS is not set"
+    # KPM: SukiSU 的内核补丁模块加载器（运行时加载 .kpm）。
+    # 依赖 KALLSYMS / KALLSYMS_ALL，Kconfig 会自动 select。
+    # 不想要就把环境变量 KSU_KPM 设为 0。
+    if [ "${KSU_KPM:-1}" = "1" ]; then
+      echo "CONFIG_KPM=y"
+    fi
+    echo "# ---- end ----"
   } >> "$DEF"
-  sed -i '/^CONFIG_ASM_MODVERSIONS=/d; /^CONFIG_MODVERSIONS=/d' "$DEF"
-  say "defconfig 已调整: CONFIG_KSU=y / MODVERSIONS off / WERROR off"
+
+  say "defconfig 已调整: CONFIG_KSU=y / KPM=${KSU_KPM:-1} / MODVERSIONS off / WERROR off"
 else
   say "警告: 未找到 $DEF，跳过 defconfig 调整"
 fi
