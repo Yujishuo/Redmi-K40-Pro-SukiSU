@@ -1,7 +1,59 @@
-# K40 Pro (haydn) 适配最新 SukiSU —— 现状诊断与执行方案
+# Redmi K40 Pro (haydn) — SukiSU-Ultra 移植记录
 
-> 生成时间：2026-10-27
 > 目标设备：Redmi K40 Pro / M2012K11C / haydn，HyperOS OS1.0.15.0.UKKCNXM（Android 14）
+> 状态：**已适配成功，日常可用** —— SukiSU-Ultra v4.2.1-r2 (41097-6) 跑在 5.4.302-AGNi 上
+
+| | |
+|---|---|
+| ![](docs/01-manager-working.png) | ![](docs/02-modules.png) |
+
+管理器和内核都正常识别，Zygisk Next 工作，模块可装。
+
+## 快速开始
+
+**方式一：GitHub Actions 一键构建**
+Actions → `build-haydn-sukisu` → Run workflow，选 `main` 模式，跑完下载 `Image` 产物。
+
+**方式二：本地构建**（已验证：WSL2 Ubuntu + clang-18，约 19 分钟）
+
+```bash
+git clone --depth=1 -b AGNi_haydn_MIUI_ST https://github.com/psndna88/AGNi_pureMIUI.git kernel
+cd kernel && rm -rf drivers/kernelsu KernelSU
+curl -LSs https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s main
+cd .. && bash scripts/patch-all-5.4.sh ./kernel        # 5.4 兼容补丁，不跑编译不过
+cd kernel && make ARCH=arm64 O=out CC=clang LD=ld.lld ... && cd ..
+```
+
+**打包 + 刷入**（无需 magiskboot / root）
+
+```bash
+python scripts/repack-boot-local.py Image boot_a_dump.img boot_new.img
+bash scripts/flash-boot-safe.sh boot_new.img          # 自带 A/B 防切槽
+```
+
+刷完 **必须** 装一次 appid 持久化脚本，否则管理器会显示"不支持/预览模式"：
+
+```bash
+adb push scripts/ksu-manager-appid.sh /data/local/tmp/x.sh
+adb shell "su -c 'cp /data/local/tmp/x.sh /data/adb/service.d/10-ksu-manager-appid.sh;
+  chown root:root /data/adb/service.d/10-ksu-manager-appid.sh;
+  chmod 755 /data/adb/service.d/10-ksu-manager-appid.sh'"
+```
+
+细节和踩坑过程见第七~十一章。
+
+## 脚本清单
+
+| 脚本 | 作用 |
+|---|---|
+| `scripts/patch-all-5.4.sh` | **核心**：8 处零散兼容 + SELinux 子系统 + defconfig，幂等 |
+| `scripts/patch-sukisu-5.4.py` | SELinux policydb 原地改写、filename_trans、appid 参数常开 |
+| `scripts/repack-boot-local.py` | 纯 Python 重打包 boot header v3（AVB footer 大端） |
+| `scripts/flash-boot-safe.sh` | 防 A/B 自动切槽的刷入 |
+| `scripts/ksu-manager-appid.sh` | 经 `service.d` 持久化 `ksu_manager_appid` |
+| `scripts/wsl-build.sh` | 完整一键构建（WSL2 路径硬编码） |
+| `scripts/rebuild.sh` / `build-clean.sh` | 增量 / 全量重编 |
+| `scripts/probe_ksu.c` | aarch64 静态探针，验证 fd + GET_INFO 链路 |
 
 ---
 

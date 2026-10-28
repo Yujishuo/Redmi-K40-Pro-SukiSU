@@ -8,7 +8,7 @@ on:
         required: false
         default: "AGNi_haydn_MIUI_ST"
       sukisu_mode:
-        description: "SukiSU 驱动模式（main=kprobe 免改源码；builtin=手动hook+SUSFS）"
+        description: "SukiSU 驱动模式（main=kprobe 免改源码；builtin=手动 hook + SUSFS）"
         required: true
         default: "main"
         type: choice
@@ -16,7 +16,7 @@ on:
           - main
           - builtin
       sukisu_ref:
-        description: "SukiSU 版本（留空=最新 tag；也可填 v4.2.1-r2 / commit）"
+        description: "SukiSU 版本（留空=最新；也可填 v4.2.1-r2 / commit）"
         required: false
         default: ""
 
@@ -28,15 +28,24 @@ jobs:
       - name: 检出构建脚本
         uses: actions/checkout@v4
 
-      - name: 安装编译依赖
+      # 本地验证过的组合是 clang-18 + lld + LTO，不要退回系统自带的 clang-14，
+      # 老版本 clang 在 SukiSU 的部分代码上会报错。
+      - name: 安装 clang-18
         run: |
           set -e
           sudo apt-get update -qq
+          sudo apt-get install -y -qq wget lsb-release software-properties-common gnupg
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s 18
+          sudo apt-get install -y -qq clang-18 lld-18 llvm-18
+          clang-18 --version | head -1
+
+      - name: 安装编译依赖
+        run: |
+          set -e
           sudo apt-get install -y -qq \
             bc bison build-essential flex libssl-dev libelf-dev \
-            python3 git zip unzip curl ca-certificates \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            clang-14 lld-14 llvm-14
+            python3 git zip unzip curl ca-certificates lz4 zstd \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
       - name: 拉取内核源码
         run: |
@@ -52,7 +61,8 @@ jobs:
         run: |
           set -e
           cd kernel
-          # AGNi 树自带 KernelSU-Next 驱动目录，先摘掉避免符号链接冲突
+          # AGNi 树自带 KernelSU-Next 驱动目录，先摘掉，
+          # 否则官方 setup.sh 看到目录已存在会直接跳过集成
           rm -rf drivers/kernelsu KernelSU
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
             | bash -s "${{ inputs.sukisu_mode }}"
@@ -65,29 +75,27 @@ jobs:
           echo "SukiSU 提交：$(cd KernelSU && git rev-parse --short HEAD)"
           ls -l drivers/kernelsu
 
-      - name: 调整 defconfig
+      # 关键步骤：不跑这段，5.4 上根本编译不过。
+      # 覆盖 8 处零散兼容（pgtable.h / file_wrapper / p4d / seccomp_cache /
+      # pkg_observer / TWA_RESUME / cpu_spoof / dispatch.c）+ SELinux 子系统 + defconfig
+      - name: 应用 Linux 5.4 兼容补丁
         run: |
           set -e
-          cd kernel
-          DEF=arch/arm64/configs/agni_haydn_defconfig
-          # 打开 KSU 驱动
-          sed -i '/^#\? *CONFIG_KSU=/d; /^#\? *CONFIG_KSU_DEBUG=/d' "$DEF"
-          printf '\nCONFIG_KSU=y\n# CONFIG_KSU_DEBUG is not set\n# CONFIG_WERROR is not set\n' >> "$DEF"
-          # builtin 模式才需要 SUSFS；main 模式不认这些符号，kconfig 会自动忽略
-          if [ "${{ inputs.sukisu_mode }}" = "builtin" ]; then
-            printf 'CONFIG_KSU_SUSFS=y\n' >> "$DEF"
-          fi
-          tail -8 "$DEF"
+          bash scripts/patch-all-5.4.sh ./kernel
+          echo "--- 校验关键 config ---"
+          grep -E '^CONFIG_(KSU|KPROBES|EXT4_FS)=' \
+            kernel/arch/arm64/configs/agni_haydn_defconfig || true
 
       - name: 编译内核
         run: |
           set -e
           cd kernel
-          MAKE_ARGS="ARCH=arm64 O=out \
-            CC=clang-14 LD=ld.lld-14 AR=llvm-ar-14 NM=llvm-nm-14 \
-            OBJCOPY=llvm-objcopy-14 OBJDUMP=llvm-objdump-14 STRIP=llvm-strip-14 \
-            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
-            LLVM_IAS=0"
+          export PATH=/usr/lib/llvm-18/bin:$PATH
+          MAKE_ARGS="ARCH=arm64 O=out
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-"
           make $MAKE_ARGS agni_haydn_defconfig
           make $MAKE_ARGS -j"$(nproc --all)"
           ls -lh out/arch/arm64/boot/Image
